@@ -3444,12 +3444,12 @@ class DataFrame:
 
             agg_exprs.extend(
                 [
-                    F.sum(F.when(missing, 1).otherwise(0)).cast("long").alias(
-                        f"__null_count_{idx}"
-                    ),
-                    F.sum(F.when(~missing, 1).otherwise(0)).cast("long").alias(
-                        f"__non_null_count_{idx}"
-                    ),
+                    F.sum(F.when(missing, 1).otherwise(0))
+                    .cast("long")
+                    .alias(f"__null_count_{idx}"),
+                    F.sum(F.when(~missing, 1).otherwise(0))
+                    .cast("long")
+                    .alias(f"__non_null_count_{idx}"),
                     F.countDistinct(valid_as_string).cast("long").alias(f"__distinct_count_{idx}"),
                     F.min(valid_as_string).alias(f"__min_{idx}"),
                     F.max(valid_as_string).alias(f"__max_{idx}"),
@@ -3493,12 +3493,8 @@ class DataFrame:
             mode = None if mode_row is None else mode_row["value"]
 
             mean = profile[f"__mean_{idx}"] if isinstance(field.dataType, NumericType) else None
-            stddev = (
-                profile[f"__stddev_{idx}"] if isinstance(field.dataType, NumericType) else None
-            )
-            median = (
-                profile[f"__median_{idx}"] if isinstance(field.dataType, NumericType) else None
-            )
+            stddev = profile[f"__stddev_{idx}"] if isinstance(field.dataType, NumericType) else None
+            median = profile[f"__median_{idx}"] if isinstance(field.dataType, NumericType) else None
 
             rows.append(
                 (
