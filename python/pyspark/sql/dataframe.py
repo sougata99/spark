@@ -3380,6 +3380,188 @@ class DataFrame:
         """
         ...
 
+    def dataQuality(self) -> "DataFrame":
+        """Profiles column-level and dataset-level data quality metrics.
+
+        This method returns one row per input column plus one synthetic
+        ``__dataset__`` row containing overall dataset completeness metrics.
+        The resulting :class:`DataFrame` includes null counts, null ratios,
+        distinct counts, min/max, mode, and numeric statistics such as mean,
+        standard deviation, and median.
+
+        Notes
+        -----
+        This function is meant for exploratory data analysis, as we make no
+        guarantee about the backward compatibility of the schema of the resulting
+        :class:`DataFrame`.
+
+        .. versionadded:: 4.1.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A new DataFrame that profiles the input DataFrame.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...     [(1, 10.0, "ok"), (2, None, "ok"), (None, 30.0, None)],
+        ...     ["id", "score", "status"],
+        ... )
+        >>> df.dataQuality().select("column", "null_count", "mean", "median").show()
+        +-----------+----------+----+------+
+        |     column|null_count|mean|median|
+        +-----------+----------+----+------+
+        |         id|         1| 1.5|   1.0|
+        |      score|         1|20.0|  10.0|
+        |     status|         1|NULL|  NULL|
+        |__dataset__|         3|NULL|  NULL|
+        +-----------+----------+----+------+
+        """
+        from pyspark.sql import functions as F
+        from pyspark.sql.types import (
+            DoubleType,
+            FloatType,
+            LongType,
+            NumericType,
+            StringType,
+            StructField,
+            StructType,
+        )
+
+        def _is_missing(column_name: str, data_type: Any) -> Column:
+            column = F.col(column_name)
+            if isinstance(data_type, (DoubleType, FloatType)):
+                return column.isNull() | F.isnan(column)
+            return column.isNull()
+
+        fields = list(self.schema.fields)
+        agg_exprs: List[Column] = [F.count("*").alias("__row_count")]
+
+        for idx, field in enumerate(fields):
+            missing = _is_missing(field.name, field.dataType)
+            valid_as_string = F.when(~missing, F.col(field.name).cast("string"))
+
+            agg_exprs.extend(
+                [
+                    F.sum(F.when(missing, 1).otherwise(0)).cast("long").alias(
+                        f"__null_count_{idx}"
+                    ),
+                    F.sum(F.when(~missing, 1).otherwise(0)).cast("long").alias(
+                        f"__non_null_count_{idx}"
+                    ),
+                    F.countDistinct(valid_as_string).cast("long").alias(f"__distinct_count_{idx}"),
+                    F.min(valid_as_string).alias(f"__min_{idx}"),
+                    F.max(valid_as_string).alias(f"__max_{idx}"),
+                ]
+            )
+
+            if isinstance(field.dataType, NumericType):
+                valid_numeric = F.when(~missing, F.col(field.name))
+                agg_exprs.extend(
+                    [
+                        F.avg(valid_numeric).cast("double").alias(f"__mean_{idx}"),
+                        F.stddev(valid_numeric).cast("double").alias(f"__stddev_{idx}"),
+                        F.percentile_approx(valid_numeric, 0.5, 10000)
+                        .cast("double")
+                        .alias(f"__median_{idx}"),
+                    ]
+                )
+
+        profile = self.agg(*agg_exprs).first()
+        assert profile is not None
+
+        row_count = int(profile["__row_count"])
+        column_count = len(fields)
+        rows: List[Tuple[Any, ...]] = []
+        total_null_count = 0
+        total_non_null_count = 0
+
+        for idx, field in enumerate(fields):
+            null_count = int(profile[f"__null_count_{idx}"])
+            non_null_count = int(profile[f"__non_null_count_{idx}"])
+            total_null_count += null_count
+            total_non_null_count += non_null_count
+
+            mode_row = (
+                self.where(~_is_missing(field.name, field.dataType))
+                .groupBy(F.col(field.name).cast("string").alias("value"))
+                .count()
+                .orderBy(F.desc("count"), F.asc("value"))
+                .first()
+            )
+            mode = None if mode_row is None else mode_row["value"]
+
+            mean = profile[f"__mean_{idx}"] if isinstance(field.dataType, NumericType) else None
+            stddev = (
+                profile[f"__stddev_{idx}"] if isinstance(field.dataType, NumericType) else None
+            )
+            median = (
+                profile[f"__median_{idx}"] if isinstance(field.dataType, NumericType) else None
+            )
+
+            rows.append(
+                (
+                    field.name,
+                    field.dataType.simpleString(),
+                    row_count,
+                    1,
+                    row_count,
+                    non_null_count,
+                    null_count,
+                    float(null_count) / row_count if row_count else 0.0,
+                    int(profile[f"__distinct_count_{idx}"]),
+                    mean,
+                    stddev,
+                    median,
+                    profile[f"__min_{idx}"],
+                    profile[f"__max_{idx}"],
+                    mode,
+                )
+            )
+
+        total_cells = row_count * column_count
+        rows.append(
+            (
+                "__dataset__",
+                "dataset",
+                row_count,
+                column_count,
+                total_cells,
+                total_non_null_count,
+                total_null_count,
+                float(total_null_count) / total_cells if total_cells else 0.0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        )
+
+        schema = StructType(
+            [
+                StructField("column", StringType(), False),
+                StructField("data_type", StringType(), False),
+                StructField("row_count", LongType(), False),
+                StructField("column_count", LongType(), False),
+                StructField("total_cells", LongType(), False),
+                StructField("non_null_count", LongType(), False),
+                StructField("null_count", LongType(), False),
+                StructField("null_ratio", DoubleType(), False),
+                StructField("distinct_count", LongType(), True),
+                StructField("mean", DoubleType(), True),
+                StructField("stddev", DoubleType(), True),
+                StructField("median", DoubleType(), True),
+                StructField("min", StringType(), True),
+                StructField("max", StringType(), True),
+                StructField("mode", StringType(), True),
+            ]
+        )
+        return self.sparkSession.createDataFrame(rows, schema=schema)
+
     @overload
     def head(self) -> Optional[Row]: ...
 

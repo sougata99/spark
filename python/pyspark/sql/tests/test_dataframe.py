@@ -204,6 +204,62 @@ class DataFrameTestsMixin:
         pydoc.render_doc(df.foo)
         pydoc.render_doc(df.take(1))
 
+    def test_data_quality(self):
+        df = self.spark.createDataFrame(
+            [
+                (1, 10.0, "x"),
+                (2, None, "x"),
+                (None, 30.0, None),
+                (2, 20.0, "y"),
+                (3, float("nan"), "x"),
+            ],
+            ["id", "score", "label"],
+        )
+
+        rows = {row["column"]: row.asDict(recursive=True) for row in df.dataQuality().collect()}
+
+        self.assertEqual(set(rows.keys()), {"id", "score", "label", "__dataset__"})
+
+        id_row = rows["id"]
+        self.assertEqual(id_row["data_type"], "bigint")
+        self.assertEqual(id_row["row_count"], 5)
+        self.assertEqual(id_row["column_count"], 1)
+        self.assertEqual(id_row["total_cells"], 5)
+        self.assertEqual(id_row["non_null_count"], 4)
+        self.assertEqual(id_row["null_count"], 1)
+        self.assertAlmostEqual(id_row["null_ratio"], 0.2)
+        self.assertEqual(id_row["distinct_count"], 3)
+        self.assertAlmostEqual(id_row["mean"], 2.0)
+        self.assertAlmostEqual(id_row["median"], 2.0)
+        self.assertEqual(id_row["min"], "1")
+        self.assertEqual(id_row["max"], "3")
+        self.assertEqual(id_row["mode"], "2")
+
+        score_row = rows["score"]
+        self.assertEqual(score_row["non_null_count"], 3)
+        self.assertEqual(score_row["null_count"], 2)
+        self.assertAlmostEqual(score_row["mean"], 20.0)
+        self.assertAlmostEqual(score_row["median"], 20.0)
+        self.assertEqual(score_row["min"], "10.0")
+        self.assertEqual(score_row["max"], "30.0")
+
+        label_row = rows["label"]
+        self.assertEqual(label_row["non_null_count"], 4)
+        self.assertEqual(label_row["null_count"], 1)
+        self.assertEqual(label_row["distinct_count"], 2)
+        self.assertIsNone(label_row["mean"])
+        self.assertEqual(label_row["mode"], "x")
+
+        dataset_row = rows["__dataset__"]
+        self.assertEqual(dataset_row["data_type"], "dataset")
+        self.assertEqual(dataset_row["row_count"], 5)
+        self.assertEqual(dataset_row["column_count"], 3)
+        self.assertEqual(dataset_row["total_cells"], 15)
+        self.assertEqual(dataset_row["non_null_count"], 11)
+        self.assertEqual(dataset_row["null_count"], 4)
+        self.assertAlmostEqual(dataset_row["null_ratio"], 4.0 / 15.0)
+        self.assertIsNone(dataset_row["mean"])
+
     def test_drop(self):
         df = self.spark.createDataFrame([("A", 50, "Y"), ("B", 60, "Y")], ["name", "age", "active"])
         self.assertEqual(df.drop("active").columns, ["name", "age"])
